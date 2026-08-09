@@ -72,6 +72,31 @@
     is_null(rr, 0)
     is_null(rr, 99)
 
+    # ----- List read barriers (force specialization of _read_prim_list etc.) -----
+    # `lr` is the Int64 list reader from slot 3; calling each barrier with n=0
+    # triggers method specialization without reading any elements. PT_Text /
+    # PT_Data have no _read_prim_list method (the dispatcher routes them to
+    # _read_text_list / _read_data_list), so skip them here.
+    for prim in instances(PrimitiveType)
+        prim === PT_Text || prim === PT_Data || _read_prim_list(lr, 0, Val(prim))
+    end
+    _read_text_list(lr, 0)
+    _read_data_list(lr, 0)
+    # A composite (struct) list reader for the struct-list barrier: build a
+    # tiny schema + one-element struct list so the barrier specializes against
+    # a real ListReader and a resolved StructNode.
+    begin
+        sf2 = parse_schema("@0x1; struct S { x @0 :Int64; }")
+        mb2 = MessageBuilder()
+        root2 = init_root_struct!(mb2, 0, 1)
+        cl = alloc_composite_list!(root2, 0, 1, 1, 0)
+        set_int64!(list_element_struct(cl, 0), 0, 0)
+        mr2, _ = read_message(write_message(mb2))
+        rr2 = get_root(mr2)
+        plr2 = get_list_field(rr2, 0)
+        _read_struct_list(plr2, sf2, "S", 1, "", nothing)
+    end
+
     # ----- Packed / agnostic -----
     packed = write_packed(mb)
     read_packed(packed)

@@ -1098,6 +1098,108 @@ end
     @test length(ov) == 3
 end
 
+@testset "list read path inference (function barriers)" begin
+    # Regression test for the function-barrier dispatch elimination in
+    # `_read_list` / `_read_prim_list` / `_read_text_list` / `_read_data_list` /
+    # `_read_struct_list`. Each inner barrier method must infer a concrete
+    # `Vector{T}` return type from its declared argument types alone, so the
+    # per-element decode loop is monomorphic (no per-element runtime dispatch).
+    # The struct-list barrier's container is concrete at runtime even though
+    # `return_type` (using declared arg types only) sees a NamedTuple UnionAll;
+    # for that case we assert on `typeof(actual_call)` instead.
+    sf = parse_schema("""
+    @0x88;
+    struct Outer {
+        i8 @0 :List(Int8);  u8 @1 :List(UInt8);
+        i16 @2 :List(Int16); u16 @3 :List(UInt16);
+        i32 @4 :List(Int32); u32 @5 :List(UInt32);
+        i64 @6 :List(Int64); u64 @7 :List(UInt64);
+        f32 @8 :List(Float32); f64 @9 :List(Float64);
+        b  @10 :List(Bool);
+        t  @11 :List(Text);
+        d  @12 :List(Data);
+        s  @13 :List(Inner);
+    }
+    struct Inner { x @0 :Int32; }
+    """)
+    b = MessageBuilder()
+    root = init_root_struct!(b, 0, 14)
+    set_one_raw!(slot, esize, raw::UInt64) = set_element!(alloc_list!(root, slot, esize, 1), 0, raw)
+    set_one_raw!(0,  INT8_LIST,  UInt64(1))
+    set_one_raw!(1,  INT8_LIST,  UInt64(2))
+    set_one_raw!(2,  INT16_LIST, UInt64(3))
+    set_one_raw!(3,  INT16_LIST, UInt64(4))
+    set_one_raw!(4,  INT32_LIST, UInt64(5))
+    set_one_raw!(5,  INT32_LIST, UInt64(6))
+    set_one_raw!(6,  INT64_LIST, UInt64(7))
+    set_one_raw!(7,  INT64_LIST, UInt64(8))
+    set_one_raw!(8,  INT32_LIST, UInt64(reinterpret(UInt32, Float32(1.0f0))))
+    set_one_raw!(9,  INT64_LIST, reinterpret(UInt64, Float64(2.0)))
+    set_one_raw!(10, BOOL_LIST,  UInt64(1))
+    tlb = alloc_list!(root, 11, POINTER_LIST, 1); set_text_element!(tlb, 0, "hi")
+    dlb = alloc_list!(root, 12, POINTER_LIST, 1); CapnProto.set_data_element!(dlb, 0, UInt8[0x01, 0x02])
+    cl = alloc_composite_list!(root, 13, 1, 1, 0); set_int32!(list_element_struct(cl, 0), 0, Int32(42))
+    bytes = write_message(b)
+    mr, _ = read_message(bytes)
+    rr = get_root(mr)
+
+    # Each primitive barrier infers a concrete Vector{T} (not Any / not Vector{Any}).
+    for (prim, T) in (
+        (PT_Int8,    Vector{Int8}),    (PT_UInt8,   Vector{UInt8}),
+        (PT_Int16,   Vector{Int16}),   (PT_UInt16,  Vector{UInt16}),
+        (PT_Int32,   Vector{Int32}),   (PT_UInt32,  Vector{UInt32}),
+        (PT_Int64,   Vector{Int64}),   (PT_UInt64,  Vector{UInt64}),
+        (PT_Float32, Vector{Float32}), (PT_Float64, Vector{Float64}),
+        (PT_Bool,    Vector{Bool}),    (PT_Void,    Vector{Nothing}),
+    )
+        rt = Core.Compiler.return_type(CapnProto._read_prim_list,
+                                        Tuple{CapnProto.ListReader, Int, Val{prim}})
+        @test rt === T
+    end
+
+    # Text / Data barriers infer concrete element types too.
+    @test Core.Compiler.return_type(CapnProto._read_text_list,
+                                    Tuple{CapnProto.ListReader, Int}) === Vector{String}
+    @test Core.Compiler.return_type(CapnProto._read_data_list,
+                                    Tuple{CapnProto.ListReader, Int}) === Vector{Vector{UInt8}}
+
+    # Struct-list barrier: `return_type` (declared-arg inference) sees only a
+    # NamedTuple UnionAll, so assert it is at least a Vector of NamedTuples
+    # (not Any / not Vector{Any}) -- the per-element store is type-checked
+    # against NamedTuple, eliminating the old Any-boxing.
+    rt = Core.Compiler.return_type(CapnProto._read_struct_list,
+                                   Tuple{CapnProto.ListReader, CapnProto.SchemaFile,
+                                         String, Int, String, Nothing})
+    @test rt <: Vector
+    @test rt !== Any
+    @test rt !== Vector{Any}
+
+    # And at runtime -- where the concrete `sf` and `type_name` are in hand --
+    # the container is fully concrete, so per-element stores into it are
+    # monomorphic and dispatch-free.
+    lr_s = get_list_field(rr, 13)
+    inner_T = CapnProto._named_tuple_type(sf["Inner"], sf)
+    @test typeof(CapnProto._read_struct_list(lr_s, sf, "Inner", 1, "", nothing)) === Vector{inner_T}
+
+    # End-to-end: _read_list dispatches to the right barrier and returns a
+    # concrete-typed vector for each primitive kind.
+    prim_type(prim) = CapnProto.SchemaType(:primitive, prim, "", nothing)
+    for (slot, prim, T) in (
+        (0,  PT_Int8,    Vector{Int8}),    (1,  PT_UInt8,   Vector{UInt8}),
+        (2,  PT_Int16,   Vector{Int16}),   (3,  PT_UInt16,  Vector{UInt16}),
+        (4,  PT_Int32,   Vector{Int32}),   (5,  PT_UInt32,  Vector{UInt32}),
+        (6,  PT_Int64,   Vector{Int64}),   (7,  PT_UInt64,  Vector{UInt64}),
+        (8,  PT_Float32, Vector{Float32}), (9,  PT_Float64, Vector{Float64}),
+        (10, PT_Bool,    Vector{Bool}),
+    )
+        out = CapnProto._read_list(get_list_field(rr, slot), sf, prim_type(prim), "", nothing)
+        @test typeof(out) === T
+    end
+    @test typeof(CapnProto._read_list(get_list_field(rr, 11), sf, prim_type(PT_Text), "", nothing)) === Vector{String}
+    @test typeof(CapnProto._read_list(get_list_field(rr, 12), sf, prim_type(PT_Data), "", nothing)) === Vector{Vector{UInt8}}
+    @test typeof(CapnProto._read_list(get_list_field(rr, 13), sf, CapnProto.SchemaType(:struct, PT_Void, "Inner", nothing), "", nothing)) === Vector{inner_T}
+end
+
 @testset "with_offsets yields (offset, value)" begin
     sf = parse_schema("""
     @0x66;

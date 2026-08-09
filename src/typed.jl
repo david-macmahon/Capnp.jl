@@ -199,7 +199,7 @@ end
 This is the single source of truth shared by `_empty_primitive`,
 `_empty_list_value`, `_read_list`, and `Base.eltype(::MessageIterator)`, so
 the empty/populated/skipped/absent paths all produce values of the same type."
-function _julia_type(ty::SchemaType, sf::SchemaFile)::Type
+function _julia_type(ty::SchemaType, sf::SchemaFile)
     if ty.kind == :primitive
         prim = ty.primitive
         if prim == PT_Void
@@ -246,7 +246,7 @@ end
 "Build the concrete NamedTuple type for a struct node from its field list.
 The element type of each field is `_julia_type` of its schema type, so the
 result matches what `_read_struct` produces for a populated message."
-function _named_tuple_type(node::StructNode, sf::SchemaFile)::Type
+function _named_tuple_type(node::StructNode, sf::SchemaFile)
     nfields = length(node.fields)
     names = ntuple(i -> Symbol(node.fields[i].name), nfields)
     T = Tuple{ntuple(i -> _julia_type(node.fields[i].type, sf), nfields)...}
@@ -743,38 +743,172 @@ function read_list(lr::ListReader, sf::SchemaFile, elem_type::SchemaType)
     return _read_list(lr, sf, elem_type, "", nothing)
 end
 
-function _read_list(lr::ListReader, sf::SchemaFile, elem_type::SchemaType, path::AbstractString, skip)
+# List reading is split into a thin outer dispatcher (`_read_list`) and
+# monomorphic inner methods keyed on the element type. The outer dispatcher
+# branches on the runtime `elem_type.kind` / `elem_type.primitive` once per
+# list and then delegates to an inner method specialized via `Val(prim)`
+# (or directly for text/data/struct lists). Each inner method constructs a
+# concrete `Vector{T}` and runs a tight loop with no per-element runtime
+# dispatch -- the original polymorphic `out = Vector{T}(undef, n)` with
+# `T::Type` produced an abstract container and a Union-typed decode call on
+# every element.
+
+function _read_list(lr::ListReader, sf::SchemaFile, elem_type::SchemaType,
+                    path::AbstractString, skip)
     n = list_length(lr)
-    T = _julia_type(elem_type, sf)
-    out = Vector{T}(undef, n)
     if elem_type.kind == :primitive
         prim = elem_type.primitive
-        if prim == PT_Text
-            for i in 1:n
-                out[i] = get_text_element(lr, i - 1)
-            end
-        elseif prim == PT_Data
-            for i in 1:n
-                out[i] = get_data_element(lr, i - 1)
-            end
-        else
-            for i in 1:n
-                out[i] = decode_primitive(prim, get_element(lr, i - 1))
-            end
-        end
+        prim === PT_Text && return _read_text_list(lr, n)
+        prim === PT_Data && return _read_data_list(lr, n)
+        return _read_prim_list(lr, n, Val(prim))
     elseif elem_type.kind == :struct
-        node = sf[elem_type.type_name]
-        # For composite-list elements, the per-element path is `path.<index>`.
-        # We don't expose indices in skip paths (they would be unwieldy and the
-        # whole list is usually skipped); instead we recurse into each element
-        # with the bare `path` so that fields *inside* each element can be
-        # skipped uniformly across all elements (e.g. "myobjs.myfield" skips the
-        # "myfield" field of every elemeent of the list "myobjs").
-        for i in 1:n
-            out[i] = _read_struct(list_element_struct(lr, i - 1), sf, node, path, skip)
-        end
+        return _read_struct_list(lr, sf, elem_type.type_name, n, path, skip)
     else
         error("unsupported list element kind $(elem_type.kind)")
+    end
+end
+
+# ----- Primitive list readers (one method per PrimitiveType) -------------------
+#
+# Each method mirrors the corresponding arm of `decode_primitive` (above) but
+# inlined for a concrete output element type, so the loop body is fully
+# monomorphic. `get_element(lr, i-1)::UInt64` is the only wire access.
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Void})
+    out = Vector{Nothing}(undef, n)
+    for i in 1:n
+        out[i] = nothing
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Bool})
+    out = Vector{Bool}(undef, n)
+    for i in 1:n
+        out[i] = get_element(lr, i - 1) != 0
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int8})
+    out = Vector{Int8}(undef, n)
+    for i in 1:n
+        out[i] = reinterpret(Int8, UInt8(get_element(lr, i - 1)))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt8})
+    out = Vector{UInt8}(undef, n)
+    for i in 1:n
+        out[i] = UInt8(get_element(lr, i - 1))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int16})
+    out = Vector{Int16}(undef, n)
+    for i in 1:n
+        out[i] = reinterpret(Int16, UInt16(get_element(lr, i - 1)))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt16})
+    out = Vector{UInt16}(undef, n)
+    for i in 1:n
+        out[i] = UInt16(get_element(lr, i - 1))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int32})
+    out = Vector{Int32}(undef, n)
+    for i in 1:n
+        out[i] = reinterpret(Int32, UInt32(get_element(lr, i - 1)))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt32})
+    out = Vector{UInt32}(undef, n)
+    for i in 1:n
+        out[i] = UInt32(get_element(lr, i - 1))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int64})
+    out = Vector{Int64}(undef, n)
+    for i in 1:n
+        out[i] = reinterpret(Int64, get_element(lr, i - 1))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt64})
+    out = Vector{UInt64}(undef, n)
+    for i in 1:n
+        out[i] = get_element(lr, i - 1)
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float32})
+    out = Vector{Float32}(undef, n)
+    for i in 1:n
+        out[i] = reinterpret(Float32, UInt32(get_element(lr, i - 1)))
+    end
+    return out
+end
+
+function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float64})
+    out = Vector{Float64}(undef, n)
+    for i in 1:n
+        out[i] = reinterpret(Float64, get_element(lr, i - 1))
+    end
+    return out
+end
+
+# Fallback so a future-added primitive (or a Text/Data Val sneaking in) errors
+# cleanly instead of no-method. (PrimitiveType is a Julia @enum, so its values
+# are instances of PrimitiveType, not subtypes; `::Val` catches any Val.)
+_read_prim_list(lr::ListReader, n::Int, ::Val) =
+    error("unsupported primitive list element type")
+
+# ----- Text / Data list readers ------------------------------------------------
+
+function _read_text_list(lr::ListReader, n::Int)
+    out = Vector{String}(undef, n)
+    for i in 1:n
+        out[i] = something(get_text_element(lr, i - 1), "")
+    end
+    return out
+end
+
+function _read_data_list(lr::ListReader, n::Int)
+    out = Vector{Vector{UInt8}}(undef, n)
+    for i in 1:n
+        out[i] = something(get_data_element(lr, i - 1), UInt8[])
+    end
+    return out
+end
+
+# ----- Struct list reader ------------------------------------------------------
+
+function _read_struct_list(lr::ListReader, sf::SchemaFile, type_name::AbstractString,
+                           n::Int, path::AbstractString, skip)
+    node = sf[type_name]::StructNode
+    T = _named_tuple_type(node, sf)
+    out = Vector{T}(undef, n)
+    # For composite-list elements, the per-element path is `path.<index>`.
+    # We don't expose indices in skip paths (they would be unwieldy and the
+    # whole list is usually skipped); instead we recurse into each element
+    # with the bare `path` so that fields *inside* each element can be
+    # skipped uniformly across all elements (e.g. "myobjs.myfield" skips the
+    # "myfield" field of every element of the list "myobjs").
+    for i in 1:n
+        out[i] = _read_struct(list_element_struct(lr, i - 1), sf, node, path, skip)
     end
     return out
 end
