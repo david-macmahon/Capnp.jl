@@ -19,8 +19,10 @@ you don't have a schema.
 ```@docs
 MessageBuilder
 MessageReader
+MmapMessageReader
 write_message
 read_message
+read_message_mmap
 nsegments
 segment_words
 alloc_segment!

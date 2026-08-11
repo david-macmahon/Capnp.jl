@@ -1014,10 +1014,16 @@ end
 end
 
 @testset "parse_messages eltype and type stability" begin
-    # The iterator's eltype is the concrete NamedTuple type determined from
-    # the schema, so `collect` returns a Vector of that type (not Vector{Any}).
-    # The type is stable across messages regardless of whether fields are
-    # populated, empty, or null, and regardless of the skip setting.
+    # The iterator's eltype is the NamedTuple type determined from the schema.
+    # For byte-strideable primitive lists (xs::List(Int32), ys::List(UInt32))
+    # the populated path returns a zero-copy `ReinterpretArray`-view of the
+    # backing bytes while the null/empty path returns a `Vector{T}`, so the
+    # field type widens to `AbstractVector{T}` and `outer_T` uses the
+    # covariant `NamedTuple{names, <:Tuple{...}}` form so both concrete
+    # NamedTuple types are subtypes. `collect` returns a `Vector{outer_T}`
+    # whose elements are one of those concrete types. The type is stable
+    # across messages regardless of whether fields are populated, empty, or
+    # null, and regardless of the skip setting.
     sf = parse_schema("""
     @0x77;
     struct Outer {
@@ -1035,18 +1041,15 @@ end
     """)
     node = sf["Outer"]
     outer_T = CapnProto._named_tuple_type(node, sf)
-    @test outer_T === @NamedTuple{
-        sub::@NamedTuple{x::Int32, y::String},
-        vals::Vector{@NamedTuple{x::Int32, y::String}},
-        xs::Vector{Int32},
-        ys::Vector{UInt32},
-        a::Int32,
-        name::String,
-    }
+    @test outer_T == NamedTuple{(:sub, :vals, :xs, :ys, :a, :name),
+                                <:Tuple{@NamedTuple{x::Int32, y::String},
+                                        Vector{@NamedTuple{x::Int32, y::String}},
+                                        AbstractVector{Int32}, AbstractVector{UInt32},
+                                        Int32, String}}
 
     # Build messages with each list/struct field in turn left null (absent),
     # so every field takes its empty/default path. The decoded type must
-    # match outer_T in every case.
+    # be a subtype of outer_T in every case.
     function null_msg()
         b = MessageBuilder()
         init_root_struct!(b, 1, 6)  # no pointers set, `a` data word left zero
@@ -1071,18 +1074,27 @@ end
         return write_message(b)
     end
 
-    @test typeof(parse_message(null_msg(), sf, "Outer")) === outer_T
-    @test typeof(parse_message(populated_msg(), sf, "Outer")) === outer_T
+    @test typeof(parse_message(null_msg(), sf, "Outer")) <: outer_T
+    @test typeof(parse_message(populated_msg(), sf, "Outer")) <: outer_T
 
-    # Skip settings targeting a list, a struct, and a scalar all preserve type.
+    # Skip settings targeting a list, a struct, and a scalar all preserve the
+    # subtype relationship to outer_T.
     bytes = populated_msg()
-    @test typeof(parse_message(bytes, sf, "Outer"; skip=["xs"])) === outer_T
-    @test typeof(parse_message(bytes, sf, "Outer"; skip=["sub"])) === outer_T
-    @test typeof(parse_message(bytes, sf, "Outer"; skip=["a"])) === outer_T
-    @test typeof(parse_message(bytes, sf, "Outer"; skip=["vals"])) === outer_T
+    @test typeof(parse_message(bytes, sf, "Outer"; skip=["xs"])) <: outer_T
+    @test typeof(parse_message(bytes, sf, "Outer"; skip=["sub"])) <: outer_T
+    @test typeof(parse_message(bytes, sf, "Outer"; skip=["a"])) <: outer_T
+    @test typeof(parse_message(bytes, sf, "Outer"; skip=["vals"])) <: outer_T
 
-    # The iterator's eltype matches the per-message type, and collect returns
-    # a Vector of that concrete type.
+    # The populated path returns a zero-copy `ReinterpretArray`-view over the
+    # backing segment bytes for byte-strideable primitive lists; the null path
+    # returns a `Vector{T}`. Both are `AbstractVector{T}`.
+    @test typeof(parse_message(populated_msg(), sf, "Outer").xs) <: AbstractVector{Int32}
+    @test typeof(parse_message(populated_msg(), sf, "Outer").ys) <: AbstractVector{UInt32}
+    @test typeof(parse_message(null_msg(),      sf, "Outer").xs) === Vector{Int32}
+    @test typeof(parse_message(null_msg(),      sf, "Outer").ys) === Vector{UInt32}
+
+    # The iterator's eltype matches outer_T, and collect returns a Vector of
+    # that type.
     stream = vcat(populated_msg(), null_msg(), populated_msg())
     itr = parse_messages(stream, sf, "Outer")
     @test eltype(itr) === outer_T
@@ -1143,18 +1155,36 @@ end
     mr, _ = read_message(bytes)
     rr = get_root(mr)
 
-    # Each primitive barrier infers a concrete Vector{T} (not Any / not Vector{Any}).
-    for (prim, T) in (
-        (PT_Int8,    Vector{Int8}),    (PT_UInt8,   Vector{UInt8}),
-        (PT_Int16,   Vector{Int16}),   (PT_UInt16,  Vector{UInt16}),
-        (PT_Int32,   Vector{Int32}),   (PT_UInt32,  Vector{UInt32}),
-        (PT_Int64,   Vector{Int64}),   (PT_UInt64,  Vector{UInt64}),
-        (PT_Float32, Vector{Float32}), (PT_Float64, Vector{Float64}),
-        (PT_Bool,    Vector{Bool}),    (PT_Void,    Vector{Nothing}),
-    )
+    # Void and Bool are NOT byte-strideable (Void carries no data; Bool is
+    # bit-packed at 1 bit/elem) so their barriers still materialize a
+    # concrete `Vector{T}`. Assert the strict type (which also excludes
+    # Any / Vector{Any}, spelled out for symmetry with the byte-strideable
+    # arm below).
+    for (prim, T) in ((PT_Void, Vector{Nothing}), (PT_Bool, Vector{Bool}))
         rt = Core.Compiler.return_type(CapnProto._read_prim_list,
                                         Tuple{CapnProto.ListReader, Int, Val{prim}})
         @test rt === T
+        @test rt !== Any
+        @test rt !== Vector{Any}
+    end
+
+    # The byte-strideable primitives are returned as a zero-copy
+    # `ReinterpretArray`-view over the backing segment bytes, whose
+    # `return_type` is a Union over the possible backing types (mmap
+    # Vector{UInt8} vs materialized Vector{UInt64}). Assert it is a
+    # concrete-typed `AbstractVector{T}` (not Any / not Vector{Any}).
+    for (prim, T) in (
+        (PT_Int8,    Int8),    (PT_UInt8,   UInt8),
+        (PT_Int16,   Int16),   (PT_UInt16,  UInt16),
+        (PT_Int32,   Int32),   (PT_UInt32,  UInt32),
+        (PT_Int64,   Int64),   (PT_UInt64,  UInt64),
+        (PT_Float32, Float32), (PT_Float64, Float64),
+    )
+        rt = Core.Compiler.return_type(CapnProto._read_prim_list,
+                                        Tuple{CapnProto.ListReader, Int, Val{prim}})
+        @test rt <: AbstractVector{T}
+        @test rt !== Any
+        @test rt !== Vector{Any}
     end
 
     # Text / Data barriers infer concrete element types too.
@@ -1182,18 +1212,26 @@ end
     @test typeof(CapnProto._read_struct_list(lr_s, sf, "Inner", 1, "", nothing)) === Vector{inner_T}
 
     # End-to-end: _read_list dispatches to the right barrier and returns a
-    # concrete-typed vector for each primitive kind.
+    # concrete-typed `AbstractVector{T}` for each primitive kind. Bool is
+    # materialized as `Vector{Bool}`; the byte-strideable primitives are
+    # returned as a `ReinterpretArray`-view (for a materialized
+    # `Vector{UInt64}`-backed `MessageReader` this is a
+    # `ReinterpretArray{T,1,UInt8,SubArray{UInt8,1,
+    # ReinterpretArray{UInt8,1,UInt64,Vector{UInt64}},...}}`).
     prim_type(prim) = CapnProto.SchemaType(:primitive, prim, "", nothing)
+    # Bool: strict concrete Vector{Bool} (materialized, not byte-strideable).
+    @test typeof(CapnProto._read_list(get_list_field(rr, 10), sf, prim_type(PT_Bool), "", nothing)) === Vector{Bool}
+    # Byte-strideable primitives: zero-copy ReinterpretArray-view, asserted
+    # as a concrete AbstractVector{T}.
     for (slot, prim, T) in (
-        (0,  PT_Int8,    Vector{Int8}),    (1,  PT_UInt8,   Vector{UInt8}),
-        (2,  PT_Int16,   Vector{Int16}),   (3,  PT_UInt16,  Vector{UInt16}),
-        (4,  PT_Int32,   Vector{Int32}),   (5,  PT_UInt32,  Vector{UInt32}),
-        (6,  PT_Int64,   Vector{Int64}),   (7,  PT_UInt64,  Vector{UInt64}),
-        (8,  PT_Float32, Vector{Float32}), (9,  PT_Float64, Vector{Float64}),
-        (10, PT_Bool,    Vector{Bool}),
+        (0,  PT_Int8,    Int8),    (1,  PT_UInt8,   UInt8),
+        (2,  PT_Int16,   Int16),   (3,  PT_UInt16,  UInt16),
+        (4,  PT_Int32,   Int32),   (5,  PT_UInt32,  UInt32),
+        (6,  PT_Int64,   Int64),   (7,  PT_UInt64,  UInt64),
+        (8,  PT_Float32, Float32), (9,  PT_Float64, Float64),
     )
         out = CapnProto._read_list(get_list_field(rr, slot), sf, prim_type(prim), "", nothing)
-        @test typeof(out) === T
+        @test typeof(out) <: AbstractVector{T}
     end
     @test typeof(CapnProto._read_list(get_list_field(rr, 11), sf, prim_type(PT_Text), "", nothing)) === Vector{String}
     @test typeof(CapnProto._read_list(get_list_field(rr, 12), sf, prim_type(PT_Data), "", nothing)) === Vector{Vector{UInt8}}
@@ -1681,6 +1719,292 @@ end
     finally
         rm(tmp; force=true)
     end
+end
+
+# ---------------------------------------------------------------------------
+# Mmap-backed reader and zero-copy primitive lists
+# ---------------------------------------------------------------------------
+#
+# `MmapMessageReader` keeps segment bodies as zero-copy views of a backing
+# byte vector (typically an `Mmap.mmap` result). The typed layer's
+# primitive-list fast path returns a `reinterpret`-view of the list body
+# directly over those bytes, so a `List(Float32)` (or any byte-strideable
+# primitive list) decodes to an `AbstractVector{T}` whose elements are read
+# on demand from the backing storage -- no per-element copy is made.
+
+@testset "MmapMessageReader basics" begin
+    # Build a simple message with an Int64 list and a Text field.
+    sf = parse_schema("""
+    @0x77;
+    struct S { a @0 :Int64; xs @1 :List(Int64); name @2 :Text; }
+    """)
+    val = (a=Int64(42), xs=Int64[10, 20, 30], name="hi")
+    bytes = build_message(val, sf, "S"; packed=false)
+
+    # read_message_mmap produces an MmapMessageReader whose segment bytes are
+    # zero-copy views of `bytes`. The message has a single segment whose body
+    # follows the segment table; `next` is the 1-based byte index just past
+    # the message (which for a single-message byte vector is `length+1`).
+    mr, next = read_message_mmap(bytes)
+    @test mr isa MmapMessageReader
+    @test CapnProto.nsegments(mr) == 1
+    @test next == length(bytes) + 1
+
+    # The segment word count matches the materialized MessageReader's.
+    mr_mat, _ = read_message(bytes)
+    @test CapnProto.segment_words(mr, 0) == CapnProto.segment_words(mr_mat, 0)
+
+    # get_word reads the same values as the materialized MessageReader.
+    for seg in 0:CapnProto.nsegments(mr)-1
+        for i in 0:CapnProto.segment_words(mr, seg)-1
+            @test CapnProto.get_word(mr, seg, i) == CapnProto.get_word(mr_mat, seg, i)
+        end
+    end
+
+    # _segment_bytes returns a byte view of the segment body (NOT the whole
+    # message: the segment table prefix is excluded). Its length matches
+    # segment_words * 8.
+    sb = CapnProto._segment_bytes(mr, 0)
+    @test sb isa AbstractVector{UInt8}
+    @test length(sb) == CapnProto.segment_words(mr, 0) * 8
+    # The segment body is a contiguous tail of `bytes` (the segment table
+    # prefix has length `length(bytes) - length(sb)`).
+    table_len = length(bytes) - length(sb)
+    @test sb == bytes[table_len + 1 : end]
+
+    # parse_struct decodes from an MmapMessageReader identically to a
+    # materialized MessageReader.
+    out = parse_struct(mr, sf, "S")
+    @test out.a === Int64(42)
+    @test out.xs == Int64[10, 20, 30]
+    @test out.name == "hi"
+end
+
+@testset "read_message_mmap validates bounds" begin
+    # Clean EOF: empty input returns nothing.
+    @test read_message_mmap_checked(UInt8[]; start=1) === nothing
+    # A single byte is truncated (need at least 4 for the segment count).
+    @test_throws TruncatedMessageError read_message_mmap_checked(UInt8[0x00]; start=1)
+    # A valid segment count but truncated segment-length table.
+    truncated = UInt8[0x00, 0x00, 0x00, 0x00]  # seg_count=1, but no length word
+    @test_throws TruncatedMessageError read_message_mmap_checked(truncated; start=1)
+    # A corrupt segment count (too large).
+    corrupt = UInt8[0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00]
+    @test_throws CorruptedMessageError read_message_mmap_checked(corrupt; start=1)
+    # A valid table but body runs past the end of the bytes.
+    sf = parse_schema("@0x77; struct S { a @0 :Int64; }")
+    bytes = build_message((a=Int64(42),), sf, "S"; packed=false)
+    truncated_body = bytes[1:end-1]  # drop the last byte -> body truncated
+    @test_throws TruncatedMessageError read_message_mmap_checked(truncated_body; start=1)
+end
+
+@testset "zero-copy primitive lists from byte vector" begin
+    # parse_message(bytes) returns a zero-copy ReinterpretArray-view for each
+    # byte-strideable primitive list, backed by the original bytes.
+    sf = parse_schema("""
+    @0x88;
+    struct N {
+        i8 @0 :List(Int8);  u8 @1 :List(UInt8);
+        i16 @2 :List(Int16); u16 @3 :List(UInt16);
+        i32 @4 :List(Int32); u32 @5 :List(UInt32);
+        i64 @6 :List(Int64); u64 @7 :List(UInt64);
+        f32 @8 :List(Float32); f64 @9 :List(Float64);
+        b  @10 :List(Bool);
+    }
+    """)
+    val = (
+        i8=Int8[-1, 0, 1], u8=UInt8[0xff, 0x00, 0x01],
+        i16=Int16[-2, -1, 0, 1, 2], u16=UInt16[0xffff, 0, 1, 2, 3],
+        i32=Int32[typemin(Int32), -1, 0, 1, typemax(Int32)],
+        u32=UInt32[0, 1, typemax(UInt32)],
+        i64=Int64[typemin(Int64), -1, 0, 1, typemax(Int64)],
+        u64=UInt64[0, 1, typemax(UInt64)],
+        f32=Float32[1.0f0, -2.5f0, 3.14f0],
+        f64=Float64[1.0, -2.5, 3.14],
+        b=Bool[true, false, true],
+    )
+    bytes = build_message(val, sf, "N"; packed=false)
+    out = parse_message(bytes, sf, "N"; packed=false)
+
+    # Each byte-strideable primitive list is an AbstractVector{T}-view
+    # (ReinterpretArray) over the backing bytes, not a materialized Vector{T}.
+    @test typeof(out.i8)  <: AbstractVector{Int8}
+    @test typeof(out.u8)  <: AbstractVector{UInt8}
+    @test typeof(out.i16) <: AbstractVector{Int16}
+    @test typeof(out.u16) <: AbstractVector{UInt16}
+    @test typeof(out.i32) <: AbstractVector{Int32}
+    @test typeof(out.u32) <: AbstractVector{UInt32}
+    @test typeof(out.i64) <: AbstractVector{Int64}
+    @test typeof(out.u64) <: AbstractVector{UInt64}
+    @test typeof(out.f32) <: AbstractVector{Float32}
+    @test typeof(out.f64) <: AbstractVector{Float64}
+    # Bool is bit-packed (not byte-strideable) and stays a materialized Vector{Bool}.
+    @test typeof(out.b) === Vector{Bool}
+
+    # The view is not a Vector{T} (it's a ReinterpretArray).
+    @test typeof(out.i32) !== Vector{Int32}
+    @test typeof(out.f32) !== Vector{Float32}
+
+    # Values are correct (the view decodes the same as a materialized read).
+    @test out.i8 == val.i8
+    @test out.u8 == val.u8
+    @test out.i16 == val.i16
+    @test out.u16 == val.u16
+    @test out.i32 == val.i32
+    @test out.u32 == val.u32
+    @test out.i64 == val.i64
+    @test out.u64 == val.u64
+    @test out.f32 == val.f32
+    @test out.f64 == val.f64
+    @test out.b == val.b
+
+    # The view shares memory with the backing bytes (proves zero-copy): the
+    # view's data pointer lies within the backing bytes' memory range.
+    out2 = parse_message(bytes, sf, "N"; packed=false)
+    p_view = UInt(pointer(out2.u32))
+    p_bytes_lo = UInt(pointer(bytes))
+    p_bytes_hi = p_bytes_lo + length(bytes)
+    @test p_view >= p_bytes_lo
+    @test p_view < p_bytes_hi
+    # Mutating the backing bytes at the list body changes the view's first
+    # element. The u32 list body is at byte offset (p_view - p_bytes_lo)
+    # within `bytes`.
+    body_off = p_view - p_bytes_lo + 1  # 1-based
+    @test body_off in 1:length(bytes)
+    @test bytes[body_off] == 0x00  # first byte of u32[1] (which is 0)
+    bytes[body_off] = 0xff
+    @test out2.u32[1] === UInt32(0xff)
+    bytes[body_off] = 0x00  # restore
+    @test out2.u32[1] === UInt32(0)
+end
+
+@testset "zero-copy primitive lists from mmap'd file" begin
+    # parse_message(filename) returns zero-copy ReinterpretArray-views backed
+    # by the mmap'd bytes; the OS pages the data in on demand.
+    sf = parse_schema("""
+    @0x77;
+    struct S { xs @0 :List(Float32); n @1 :Int32; }
+    """)
+    val = (xs=Float32[1.0f0, 2.0f0, 3.0f0, 4.0f0], n=Int32(42))
+    bytes = build_message(val, sf, "S"; packed=false)
+    tmp = tempname() * ".bin"
+    write(tmp, bytes)
+    try
+        out = parse_message(tmp, sf, "S"; packed=false)
+        @test typeof(out.xs) <: AbstractVector{Float32}
+        @test typeof(out.xs) !== Vector{Float32}
+        @test out.xs == val.xs
+        @test out.n === Int32(42)
+
+        # parse_messages(filename) also returns zero-copy views.
+        stream = vcat(bytes, bytes)
+        stmp = tempname() * ".bin"
+        write(stmp, stream)
+        try
+            msgs = collect(parse_messages(stmp, sf, "S"; packed=false))
+            @test length(msgs) == 2
+            for m in msgs
+                @test typeof(m.xs) <: AbstractVector{Float32}
+                @test typeof(m.xs) !== Vector{Float32}
+                @test m.xs == val.xs
+                @test m.n === Int32(42)
+            end
+        finally
+            rm(stmp; force=true)
+        end
+    finally
+        rm(tmp; force=true)
+    end
+end
+
+@testset "zero-copy primitive lists from byte vector stream" begin
+    # parse_messages(bytes) on an unpacked stream returns zero-copy views
+    # backed by the original bytes.
+    sf = parse_schema("""
+    @0x77;
+    struct S { xs @0 :List(Float32); n @1 :Int32; }
+    """)
+    val = (xs=Float32[1.0f0, 2.0f0, 3.0f0], n=Int32(7))
+    bytes = build_message(val, sf, "S"; packed=false)
+    stream = vcat(bytes, bytes, bytes)
+    msgs = collect(parse_messages(stream, sf, "S"; packed=false))
+    @test length(msgs) == 3
+    for m in msgs
+        @test typeof(m.xs) <: AbstractVector{Float32}
+        @test typeof(m.xs) !== Vector{Float32}
+        @test m.xs == val.xs
+        @test m.n === Int32(7)
+    end
+
+    # with_offsets works over the mmap-backed iterator.
+    pairs = collect(with_offsets(parse_messages(stream, sf, "S"; packed=false)))
+    @test length(pairs) == 3
+    @test pairs[1][1] == 0
+    @test issorted([p[1] for p in pairs])
+    for (off, m) in pairs
+        @test typeof(m.xs) <: AbstractVector{Float32}
+        @test m.xs == val.xs
+    end
+end
+
+@testset "packed input falls back to materialized AbstractVector{T}" begin
+    # Packed input must be unpacked (materialized into Vector{UInt64} segments),
+    # so primitive lists cannot be views over the original packed bytes. They
+    # ARE still zero-copy views of the materialized segment words (a
+    # ReinterpretArray over the segment's Vector{UInt64}), so the return type
+    # is an AbstractVector{T}-view, not a Vector{T}. This is the best we can
+    # do for packed input -- the per-element decode loop is avoided, but the
+    # segment words are materialized by the unpacker.
+    sf = parse_schema("@0x77; struct S { xs @0 :List(Float32); }")
+    val = (xs=Float32[1.0f0, 2.0f0, 3.0f0],)
+    pbytes = build_message(val, sf, "S"; packed=true)
+    out = parse_message(pbytes, sf, "S"; packed=true)
+    @test typeof(out.xs) <: AbstractVector{Float32}
+    @test out.xs == val.xs
+
+    # Packed stream via parse_messages.
+    stream = vcat(pbytes, pbytes)
+    msgs = collect(parse_messages(stream, sf, "S"; packed=true))
+    @test length(msgs) == 2
+    for m in msgs
+        @test typeof(m.xs) <: AbstractVector{Float32}
+        @test m.xs == val.xs
+    end
+end
+
+@testset "MmapMessageReader handles multi-segment messages" begin
+    # A multi-segment message (with a far pointer to seg1) decoded via the
+    # mmap-backed reader: the far pointer resolves across segments, and the
+    # primitive list in seg1 is a zero-copy view of the mmap'd seg1 bytes.
+    sf = parse_schema("""
+    @0x77;
+    struct Inner { a @0 :Int32; b @1 :List(Float32); }
+    struct Outer { name @0 :Text; inner @1 :Inner; }
+    """)
+    bytes, seg1_bytes = build_two_segment_hit("hi", 7, Float32[i for i in 0:99])
+    out = parse_message(bytes, sf, "Outer"; packed=false)
+    @test out.name == "hi"
+    @test out.inner.a == 7
+    @test typeof(out.inner.b) <: AbstractVector{Float32}
+    @test out.inner.b == Float32[Float32(i) for i in 0:99]
+
+    # nsegments of the MmapMessageReader is 2 (seg0 + seg1).
+    mr, _ = read_message_mmap(bytes)
+    @test CapnProto.nsegments(mr) == 2
+    # The segment bodies do NOT sum to length(bytes) -- the segment table
+    # (with padding) sits between the start of `bytes` and seg0, and there
+    # is no inter-segment gap (seg1 immediately follows seg0). The total
+    # segment body bytes plus the table bytes equals length(bytes).
+    body_bytes = (CapnProto.segment_words(mr, 0) + CapnProto.segment_words(mr, 1)) * 8
+    table_bytes = length(bytes) - body_bytes
+    @test table_bytes > 0
+    @test table_bytes % 8 == 0  # table is padded to a word boundary
+    # _segment_bytes returns distinct views for each segment.
+    sb0 = CapnProto._segment_bytes(mr, 0)
+    sb1 = CapnProto._segment_bytes(mr, 1)
+    @test length(sb0) == CapnProto.segment_words(mr, 0) * 8
+    @test length(sb1) == CapnProto.segment_words(mr, 1) * 8
+    @test length(sb0) + length(sb1) == body_bytes
 end
 
 

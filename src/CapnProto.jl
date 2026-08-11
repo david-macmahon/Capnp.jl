@@ -3,7 +3,7 @@ module CapnProto
 using Mmap
 using PrecompileTools: @compile_workload
 
-export MessageBuilder, MessageReader
+export MessageBuilder, MessageReader, MmapMessageReader
 export StructBuilder, ListBuilder, StructReader, ListReader
 export init_root_struct!, init_root_list!
 export get_root
@@ -19,7 +19,7 @@ export get_text, get_data
 export get_struct_field, get_list_field
 export list_length, list_element, list_element_struct
 export is_null
-export write_message, read_message
+export write_message, read_message, read_message_mmap, read_message_mmap_checked
 export write_packed, read_packed
 export pack, unpack
 export looks_packed, read_message_agnostic

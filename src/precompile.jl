@@ -107,6 +107,25 @@
     pack(bytes)
     unpack(packed)
 
+    # ----- Mmap-backed reader (force specialization of the zero-copy paths) -----
+    mr_mmap, _ = read_message_mmap(bytes)
+    get_root(mr_mmap)
+    get_int64(get_root(mr_mmap), 0)
+    _segment_bytes(mr_mmap, 0)
+    _segment_bytes(mr, 0)
+    # Exercise the primitive-list fast path for each byte-strideable primitive
+    # against both the MmapMessageReader (Vector{UInt8}-backed) and the
+    # MessageReader (Vector{UInt64}-backed, reinterpreted as UInt8).
+    lr_mmap = get_list_field(get_root(mr_mmap), 3)
+    for prim in instances(PrimitiveType)
+        prim === PT_Text || prim === PT_Data ||
+            _read_prim_list(lr_mmap, 0, Val(prim))
+    end
+    # read_message_mmap_checked (the streaming mmap reader) on a clean stream
+    # and on an empty input.
+    read_message_mmap_checked(bytes; start=1)
+    read_message_mmap_checked(UInt8[]; start=1)
+
     # ----- Wire helpers (force specialization) -----
     struct_pointer(5, 3, 7)
     list_pointer(2, INT64_LIST, 4)

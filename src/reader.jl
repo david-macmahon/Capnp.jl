@@ -5,38 +5,49 @@
 """
     StructReader
 
-A read-only view of a struct within a `MessageReader`. Located by segment id
-and the word index of the start of the struct's data section.
+A read-only view of a struct within a `MessageReader` (or
+`MmapMessageReader`). Located by segment id and the word index of the start
+of the struct's data section. Parameterized by the underlying message type
+so a `StructReader` over an mmap-backed message retains a reference to the
+mmap'd bytes.
 """
-struct StructReader
-    msg::MessageReader
+struct StructReader{M}
+    msg::M
     seg::Int
     base::Int          # word index of the first data word
     data_words::Int
     ptr_count::Int
+    StructReader(msg::M, seg::Integer, base::Integer, data_words::Integer, ptr_count::Integer) where M =
+        new{M}(msg, Int(seg), Int(base), Int(data_words), Int(ptr_count))
 end
 
 """
     ListReader
 
-A read-only view of a list within a `MessageReader`. For composite lists,
-`base` points at the tag word and elements start at `base + 1`.
+A read-only view of a list within a `MessageReader` (or `MmapMessageReader`).
+For composite lists, `base` points at the tag word and elements start at
+`base + 1`. Parameterized by the underlying message type so a `ListReader`
+over an mmap-backed message retains a reference to the mmap'd bytes.
 """
-struct ListReader
-    msg::MessageReader
+struct ListReader{M}
+    msg::M
     seg::Int
     base::Int          # word index of the first body word (for composite: the tag word)
     element_size::UInt64
     element_count::Int
     elem_data_words::Int
     elem_ptr_count::Int
+    ListReader(msg::M, seg::Integer, base::Integer, element_size::Integer,
+               element_count::Integer, elem_data_words::Integer, elem_ptr_count::Integer) where M =
+        new{M}(msg, Int(seg), Int(base), UInt64(element_size), Int(element_count),
+               Int(elem_data_words), Int(elem_ptr_count))
 end
 
 # ----- Root and pointer resolution ---------------------------------------------
 
 "Resolve a pointer word located at `seg`,`word_idx`. Returns a resolved pointee.
 The return is either a StructReader, ListReader, or `nothing` if the pointer is null."
-function resolve_pointer(msg::MessageReader, seg::Int, word_idx::Int)
+function resolve_pointer(msg, seg::Int, word_idx::Int)
     p = get_word(msg, seg, word_idx)
     if p == 0
         return nothing
@@ -44,7 +55,7 @@ function resolve_pointer(msg::MessageReader, seg::Int, word_idx::Int)
     return resolve_pointer_value(msg, seg, word_idx, p)
 end
 
-function resolve_pointer_value(msg::MessageReader, seg::Int, word_idx::Int, p::UInt64)
+function resolve_pointer_value(msg, seg::Int, word_idx::Int, p::UInt64)
     t = pointer_type(p)
     if t == STRUCT_POINTER
         off = pointer_offset(p)
@@ -73,7 +84,7 @@ function resolve_pointer_value(msg::MessageReader, seg::Int, word_idx::Int, p::U
     end
 end
 
-function resolve_far(msg::MessageReader, p::UInt64)
+function resolve_far(msg, p::UInt64)
     target_seg = Int(far_segment_id(p))  # 0-based
     target_off = Int(far_offset(p))      # 0-based word index
     if far_is_double(p)
@@ -91,15 +102,17 @@ end
 "Is word `i` (0-based) present in segment `seg` (0-based)? A segment that was
 skipped during reading (see `parse_messages` with `skip=...`) is empty, so far
 pointers into it are treated as null."
-@inline _seg_has_word(msg::MessageReader, seg::Int, i::Int) =
+@inline _seg_has_word(msg, seg::Int, i::Int) =
     0 <= seg < nsegments(msg) && 0 <= i < segment_words(msg, seg)
 
 """
-    get_root(mr::MessageReader)::StructReader
+    get_root(mr)::StructReader
 
-Get the root struct of a message.
+Get the root struct of a message. Works with any message type whose accessors
+`get_word`, `nsegments`, and `segment_words` are defined (i.e. both
+[`MessageReader`](@ref) and [`MmapMessageReader`](@ref)).
 """
-function get_root(mr::MessageReader)::StructReader
+function get_root(mr)::StructReader
     p = get_word(mr, 0, 0)
     if pointer_type(p) == STRUCT_POINTER
         off = pointer_offset(p)
@@ -324,6 +337,16 @@ end
 Number of elements in a list.
 """
 list_length(lr::ListReader)::Int = lr.element_count
+
+"""
+    _segment_bytes(lr::ListReader)
+
+Internal: the little-endian byte view of the segment containing the list body.
+Delegates to the message's [`_segment_bytes`](@ref) trait. Used by the typed
+layer's primitive-list fast path to return a zero-copy `reinterpret` view of
+a primitive list body directly over the backing storage (mmap or otherwise).
+"""
+_segment_bytes(lr::ListReader) = _segment_bytes(lr.msg, lr.seg)
 
 """
     get_element(lr::ListReader, i::Int)::UInt64

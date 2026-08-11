@@ -195,10 +195,38 @@ function _child_path(parent::AbstractString, child::AbstractString)
     isempty(parent) ? String(child) : string(parent, ".", child)
 end
 
+"Return true iff `prim` is a byte-strideable primitive whose list encoding
+(INT8/INT16/INT32/INT64 list, of which FLOAT32/FLOAT64 are aliases) is a
+contiguous little-endian run of `sizeof(T)` bytes per element. Such lists
+can be returned as a zero-copy `reinterpret` view over the backing segment
+bytes (mmap or otherwise). Void (0 bits/elem) and Bool (1 bit/elem) are NOT
+byte-strideable and must be materialized element-by-element."
+_byte_strideable(prim::PrimitiveType) =
+    prim in (PT_Int8, PT_UInt8, PT_Int16, PT_UInt16,
+             PT_Int32, PT_UInt32, PT_Int64, PT_UInt64,
+             PT_Float32, PT_Float64)
+
+"Return the container type used for a `List(prim)` field. Byte-strideable
+primitives use `AbstractVector{T}` so the typed reader may return a zero-copy
+`reinterpret`-view over the backing bytes; non-byte-strideable primitives
+(Void, Bool) and pointer lists (Text, Data) use `Vector{T}` since they must
+be materialized element-by-element."
+_list_container_type(elem_type::SchemaType, sf::SchemaFile) =
+    _byte_strideable(elem_type.primitive) ?
+        AbstractVector{_julia_type(elem_type, sf)} :
+        Vector{_julia_type(elem_type, sf)}
+
 "Return the concrete Julia type a field of schema type `ty` decodes to.
 This is the single source of truth shared by `_empty_primitive`,
 `_empty_list_value`, `_read_list`, and `Base.eltype(::MessageIterator)`, so
-the empty/populated/skipped/absent paths all produce values of the same type."
+the empty/populated/skipped/absent paths all produce values of the same type.
+
+For a `List(T)` whose element `T` is a byte-strideable primitive
+(Int8/UInt8/Int16/UInt16/Int32/UInt32/Int64/UInt64/Float32/Float64), the
+container type is `AbstractVector{T}` -- the typed reader returns a
+zero-copy `reinterpret`-view of the segment bytes (mmap-backed or otherwise)
+rather than a materialized `Vector{T}`. For Void/Bool/Text/Data/struct
+lists the container is the materialized `Vector{...}` as before."
 function _julia_type(ty::SchemaType, sf::SchemaFile)
     if ty.kind == :primitive
         prim = ty.primitive
@@ -236,7 +264,12 @@ function _julia_type(ty::SchemaType, sf::SchemaFile)
     elseif ty.kind == :struct
         return _named_tuple_type(sf[ty.type_name], sf)
     elseif ty.kind == :list
-        return Vector{_julia_type(ty.element[], sf)}
+        elem = ty.element[]
+        if elem.kind == :primitive && _byte_strideable(elem.primitive)
+            return AbstractVector{_julia_type(elem, sf)}
+        else
+            return Vector{_julia_type(elem, sf)}
+        end
     else
         # :enum / :interface are not decoded by the typed layer yet.
         return Any
@@ -244,14 +277,35 @@ function _julia_type(ty::SchemaType, sf::SchemaFile)
 end
 
 "Build the concrete NamedTuple type for a struct node from its field list.
-The element type of each field is `_julia_type` of its schema type, so the
-result matches what `_read_struct` produces for a populated message."
+The element type of each field is `_julia_type` of its schema type.
+
+When all field types are concrete, the result is a concrete
+`NamedTuple{names, Tuple{...}}` and all decode paths (populated, null, skip)
+produce values `isa` that type. When one or more fields have an abstract
+container type (e.g. `AbstractVector{Int32}` for a byte-strideable primitive
+list -- the populated path returns a `ReinterpretArray`-view, the null path
+returns a `Vector{T}`), the result uses the covariant
+`NamedTuple{names, <:Tuple{...}}` form so that both concrete NamedTuple
+types are subtypes. `Vector{outer_T}` then stores either concrete type
+uniformly, and `collect(parse_messages(...))` returns a `Vector{outer_T}`."
 function _named_tuple_type(node::StructNode, sf::SchemaFile)
     nfields = length(node.fields)
     names = ntuple(i -> Symbol(node.fields[i].name), nfields)
-    T = Tuple{ntuple(i -> _julia_type(node.fields[i].type, sf), nfields)...}
-    return NamedTuple{names, T}
+    types = ntuple(i -> _julia_type(node.fields[i].type, sf), nfields)
+    T = Tuple{types...}
+    # If every field type is concrete, return the concrete NamedTuple.
+    # Otherwise use the covariant upper-bounded form so different concrete
+    # field types (e.g. Vector{T} vs ReinterpretArray{T,...}) are subtypes.
+    return _isconcrete_all(types) ? NamedTuple{names, T} :
+           NamedTuple{names, <:T}
 end
+
+"True iff every type in `types` is a concrete type (not a UnionAll or
+abstract type like `AbstractVector{T}`). Used to decide whether
+`_named_tuple_type` can return a concrete `NamedTuple{names, T}` or must use
+the covariant `NamedTuple{names, <:T}` form so that different concrete field
+types (e.g. `Vector{T}` vs `ReinterpretArray{T,...}`) are both subtypes."
+_isconcrete_all(types::Tuple) = all(isconcretetype, types)
 
 "Return a typed empty value for a skipped field of the given element SchemaType."
 function _empty_value(ty::SchemaType, sf::SchemaFile)
@@ -770,9 +824,41 @@ end
 
 # ----- Primitive list readers (one method per PrimitiveType) -------------------
 #
-# Each method mirrors the corresponding arm of `decode_primitive` (above) but
-# inlined for a concrete output element type, so the loop body is fully
-# monomorphic. `get_element(lr, i-1)::UInt64` is the only wire access.
+# Void and Bool lists are not byte-strideable (Void carries no data; Bool is
+# bit-packed at 1 bit/elem) and are materialized element-by-element via
+# `get_element`.
+#
+# The byte-strideable primitives (Int8/UInt8/Int16/UInt16/Int32/UInt32/Int64/
+# UInt64/Float32/Float64) are returned as a zero-copy `reinterpret`-view of
+# the segment's backing bytes (mmap-backed or otherwise). The list body lives
+# at byte offset `lr.base * 8` within the segment and is a contiguous run of
+# `n * sizeof(T)` little-endian bytes (with the trailing word's unused high
+# bytes -- which lie beyond `n * sizeof(T)` -- ignored). `_segment_bytes`
+# returns the segment body as an `AbstractVector{UInt8}` view, so the
+# resulting `reinterpret(T, @view segbytes[range])` reads directly from the
+# backing storage with no per-element copy. On a little-endian host this is
+# also a no-op endianness-wise: the wire is little-endian and the host reads
+# little-endian, so the reinterpreted values are correct. On a big-endian
+# host we fall back to the materialized loop (the bytes would need swapping).
+
+"The byte offset (0-based) of element `i` (0-based) of a primitive list body
+within its segment's byte view. For byte-strideable primitives the body is a
+contiguous run of `n * elem_bytes` bytes starting at `lr.base * 8`."
+@inline _list_body_byte_offset(lr::ListReader, ::Int) = lr.base * 8
+
+"Return a zero-copy `AbstractVector{T}` view of the body of a byte-strideable
+primitive list, reinterpreted directly over the segment's backing bytes. `T`
+is the concrete Julia element type and `elem_bytes` is `sizeof(T)`. The view
+covers exactly `n` elements (NOT the full word-rounded body), so the trailing
+word's unused high bytes are excluded."
+@inline function _reinterpret_prim_view(lr::ListReader, ::Type{T}, n::Int) where T
+    segbytes = _segment_bytes(lr)
+    elem_bytes = sizeof(T)
+    body_off = _list_body_byte_offset(lr, 0)  # 0-based byte offset within segbytes
+    # `segbytes` is 1-based; the body occupies bytes [body_off+1 .. body_off+n*elem_bytes].
+    body = @view segbytes[body_off + 1 : body_off + n * elem_bytes]
+    return reinterpret(T, body)
+end
 
 function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Void})
     out = Vector{Nothing}(undef, n)
@@ -790,84 +876,72 @@ function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Bool})
     return out
 end
 
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int8})
-    out = Vector{Int8}(undef, n)
-    for i in 1:n
-        out[i] = reinterpret(Int8, UInt8(get_element(lr, i - 1)))
+# On a little-endian host, return a zero-copy `reinterpret`-view of the list
+# body directly over the backing bytes (mmap or otherwise). On a big-endian
+# host the wire bytes (little-endian) would need swapping per element, so we
+# fall back to the materialized per-element loop using `get_element`.
+if ENDIAN_BOM == 0x04030201  # little-endian host
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int8})    = _reinterpret_prim_view(lr, Int8, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt8})   = _reinterpret_prim_view(lr, UInt8, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int16})   = _reinterpret_prim_view(lr, Int16, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt16})  = _reinterpret_prim_view(lr, UInt16, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int32})   = _reinterpret_prim_view(lr, Int32, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt32})  = _reinterpret_prim_view(lr, UInt32, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int64})   = _reinterpret_prim_view(lr, Int64, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt64})  = _reinterpret_prim_view(lr, UInt64, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float32}) = _reinterpret_prim_view(lr, Float32, n)
+    _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float64}) = _reinterpret_prim_view(lr, Float64, n)
+else  # big-endian host: fall back to per-element decode (bytes need swapping)
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int8})
+        out = Vector{Int8}(undef, n)
+        for i in 1:n; out[i] = reinterpret(Int8, UInt8(get_element(lr, i - 1))); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt8})
-    out = Vector{UInt8}(undef, n)
-    for i in 1:n
-        out[i] = UInt8(get_element(lr, i - 1))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt8})
+        out = Vector{UInt8}(undef, n)
+        for i in 1:n; out[i] = UInt8(get_element(lr, i - 1)); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int16})
-    out = Vector{Int16}(undef, n)
-    for i in 1:n
-        out[i] = reinterpret(Int16, UInt16(get_element(lr, i - 1)))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int16})
+        out = Vector{Int16}(undef, n)
+        for i in 1:n; out[i] = reinterpret(Int16, UInt16(get_element(lr, i - 1))); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt16})
-    out = Vector{UInt16}(undef, n)
-    for i in 1:n
-        out[i] = UInt16(get_element(lr, i - 1))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt16})
+        out = Vector{UInt16}(undef, n)
+        for i in 1:n; out[i] = UInt16(get_element(lr, i - 1)); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int32})
-    out = Vector{Int32}(undef, n)
-    for i in 1:n
-        out[i] = reinterpret(Int32, UInt32(get_element(lr, i - 1)))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int32})
+        out = Vector{Int32}(undef, n)
+        for i in 1:n; out[i] = reinterpret(Int32, UInt32(get_element(lr, i - 1))); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt32})
-    out = Vector{UInt32}(undef, n)
-    for i in 1:n
-        out[i] = UInt32(get_element(lr, i - 1))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt32})
+        out = Vector{UInt32}(undef, n)
+        for i in 1:n; out[i] = UInt32(get_element(lr, i - 1)); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int64})
-    out = Vector{Int64}(undef, n)
-    for i in 1:n
-        out[i] = reinterpret(Int64, get_element(lr, i - 1))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Int64})
+        out = Vector{Int64}(undef, n)
+        for i in 1:n; out[i] = reinterpret(Int64, get_element(lr, i - 1)); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt64})
-    out = Vector{UInt64}(undef, n)
-    for i in 1:n
-        out[i] = get_element(lr, i - 1)
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_UInt64})
+        out = Vector{UInt64}(undef, n)
+        for i in 1:n; out[i] = get_element(lr, i - 1); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float32})
-    out = Vector{Float32}(undef, n)
-    for i in 1:n
-        out[i] = reinterpret(Float32, UInt32(get_element(lr, i - 1)))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float32})
+        out = Vector{Float32}(undef, n)
+        for i in 1:n; out[i] = reinterpret(Float32, UInt32(get_element(lr, i - 1))); end
+        return out
     end
-    return out
-end
-
-function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float64})
-    out = Vector{Float64}(undef, n)
-    for i in 1:n
-        out[i] = reinterpret(Float64, get_element(lr, i - 1))
+    function _read_prim_list(lr::ListReader, n::Int, ::Val{PT_Float64})
+        out = Vector{Float64}(undef, n)
+        for i in 1:n; out[i] = reinterpret(Float64, get_element(lr, i - 1)); end
+        return out
     end
-    return out
 end
 
 # Fallback so a future-added primitive (or a Text/Data Val sneaking in) errors
@@ -998,6 +1072,14 @@ vector. The encoding is auto-detected at `pos` via [`looks_packed`](@ref); pass
 0-based byte offset at which the message begins (default 0), matching the
 convention of `position`/`seek`.
 
+For unpacked input the message is read into an [`MmapMessageReader`](@ref)
+whose segment bodies are zero-copy views of `bytes`, so byte-strideable
+primitive lists (`List(Int8)`/`UInt8`/`Int16`/`UInt16`/`Int32`/`UInt32`/
+`Int64`/`UInt64`/`Float32`/`Float64`) are returned as `reinterpret`-views
+directly over `bytes` -- no per-element copy is made. For packed input the
+message must be unpacked (materialized) and so cannot share the mmap-backed
+representation; the decoded primitive lists are `Vector{T}`.
+
 `skip` optionally skips decoding one or more fields, returning typed empty
 values for them; see [`read_struct`](@ref). When reading from a byte vector the
 field's bytes are already in memory, so `skip` saves decode CPU and the
@@ -1007,9 +1089,16 @@ streaming [`parse_messages`](@ref) with `skip=`.
 """
 function parse_message(bytes::Vector{UInt8}, sf::SchemaFile, node_name::AbstractString;
                        packed::Union{Bool,Nothing}=nothing, pos::Int=0, skip=nothing)
+    if packed === nothing
+        packed = looks_packed(bytes; start=pos + 1)
+    end
+    if packed
+        mr = read_packed(bytes; start=pos + 1)
+    else
+        mr, _ = read_message_mmap(bytes; start=pos + 1)
+    end
     node = sf.flat[node_name]
-    r = read_message_agnostic(bytes; packed=packed, start=pos + 1)
-    return read_struct(get_root(r), sf, node; skip=skip)
+    return read_struct(get_root(mr), sf, node; skip=skip)
 end
 
 """
@@ -1056,6 +1145,18 @@ The encoding is auto-detected at `pos` via [`looks_packed`](@ref); pass
 The file is memory-mapped (via `Mmap.mmap`) rather than read into memory, so
 the OS pages it in on demand as the message is decoded.
 
+For unpacked input the message is read into an [`MmapMessageReader`](@ref)
+whose segment bodies are zero-copy views of the mmap'd bytes. As a result,
+byte-strideable primitive lists (`List(Int8)`/`UInt8`/`Int16`/`UInt16`/
+`Int32`/`UInt32`/`Int64`/`UInt64`/`Float32`/`Float64`) are returned as
+`reinterpret`-views directly over the mmap'd region -- no per-element copy
+is made and the OS pages the data in on demand. (Void and Bool lists, and
+Text/Data/struct lists, are still materialized element-by-element.)
+
+For packed input the message must be unpacked (materialized) and so cannot
+share the mmap-backed representation; the decoded primitive lists are
+`Vector{T}` as in the in-memory case.
+
 `skip` optionally skips decoding one or more fields, returning typed empty
 values for them; see [`read_struct`](@ref). Because the file is memory-mapped,
 skipped segments are never paged in by the OS, so `skip` saves both memory and
@@ -1066,24 +1167,39 @@ segments' words are not retained.
 function parse_message(filename::AbstractString, sf::SchemaFile, node_name::AbstractString;
                        packed::Union{Bool,Nothing}=nothing, pos::Int=0, skip=nothing)
     bytes = open(Mmap.mmap, filename)
-    return parse_message(bytes, sf, node_name; packed=packed, pos=pos, skip=skip)
+    if packed === nothing
+        packed = looks_packed(bytes; start=pos + 1)
+    end
+    if packed
+        # Packed: must materialize via the packed decoder; cannot share the
+        # mmap-backed representation.
+        mr = read_packed(bytes; start=pos + 1)
+    else
+        # Unpacked: build an MmapMessageReader whose segment bodies are
+        # zero-copy views of the mmap'd bytes, so byte-strideable primitive
+        # lists decode as `reinterpret`-views directly over the mmap region.
+        mr, _ = read_message_mmap(bytes; start=pos + 1)
+    end
+    node = sf.flat[node_name]
+    return read_struct(get_root(mr), sf, node; skip=skip)
 end
 
 """
-    parse_struct(mr::MessageReader, sf::SchemaFile, node_name::AbstractString; skip=nothing)
+    parse_struct(mr, sf::SchemaFile, node_name::AbstractString; skip=nothing)
 
-Decode a typed value from an already-read `MessageReader` whose root is the
-struct node `node_name` of `sf`. This is the typed layer over
-`read_message`/`read_message_io`/`read_message_agnostic`: read the raw message
-by any means, then call `parse_struct` to decode it.
+Decode a typed value from an already-read message reader whose root is the
+struct node `node_name` of `sf`. `mr` may be a [`MessageReader`](@ref) or an
+[`MmapMessageReader`](@ref). This is the typed layer over
+`read_message`/`read_message_io`/`read_message_agnostic`/`read_message_mmap`:
+read the raw message by any means, then call `parse_struct` to decode it.
 
 `skip` optionally skips decoding one or more fields, returning typed empty
-values for them; see [`read_struct`](@ref). If the `MessageReader` was produced
+values for them; see [`read_struct`](@ref). If the message reader was produced
 by a skip-aware reader (e.g. `parse_messages` with `skip=`), the skipped
 segments are already empty and the typed layer returns the empty values
 naturally.
 """
-function parse_struct(mr::MessageReader, sf::SchemaFile, node_name::AbstractString; skip=nothing)
+function parse_struct(mr, sf::SchemaFile, node_name::AbstractString; skip=nothing)
     node = sf.flat[node_name]
     return read_struct(get_root(mr), sf, node; skip=skip)
 end
@@ -1139,13 +1255,13 @@ struct segments are retained.
 function parse_messages(src, sf::SchemaFile, node_name::AbstractString;
                         packed::Union{Bool,Nothing}=nothing, skip=nothing,
                         throw_on_error::Union{Bool,Nothing}=false)
-    bio, src_name = _as_buffered_io(src)
+    bio, src_name, bytes = _as_buffered_io(src)
     is_p = if packed === nothing
         ispacked(bio)
     else
         packed
     end
-    return MessageIterator(sf, String(node_name), bio, is_p, skip, src_name, throw_on_error)
+    return MessageIterator(sf, String(node_name), bio, bytes, is_p, skip, src_name, throw_on_error)
 end
 
 "Wrap `src` in a buffered IO suitable for lazy reading. Byte vectors and
@@ -1153,19 +1269,24 @@ filenames get an IOBuffer over their contents; an existing IO is used directly.
 Filenames are memory-mapped (via `Mmap.mmap`) so the file is not fully loaded
 into memory up front -- the OS pages it in on demand as the iterator reads.
 
-Returns `(io, src_name)` where `src_name` is a human-readable identifier for
-warnings: the filename for `AbstractString`, `<byte vector>` for a byte
-vector, `<IO>` for an IO."
+Returns `(io, src_name, bytes)` where `src_name` is a human-readable identifier
+for warnings (the filename / `<byte vector>` / `<IO>`) and `bytes` is the
+underlying byte vector when the IO is backed by one (a byte vector or an
+mmap'd file), or `nothing` for a raw IO. When `bytes` is non-`nothing` and the
+stream is unpacked, `MessageIterator` uses `read_message_mmap` to produce
+`MmapMessageReader`s whose segment bodies are zero-copy views of `bytes`, so
+byte-strideable primitive lists decode as `reinterpret`-views directly over
+the backing storage (mmap'd or otherwise) with no per-element copy."
 function _as_buffered_io(src)
     if src isa AbstractVector{UInt8}
-        return IOBuffer(src; read=true, write=false), "<byte vector>"
+        return IOBuffer(src; read=true, write=false), "<byte vector>", src
     elseif src isa AbstractString
         # Memory-map the file so iteration reads it lazily via the OS page
         # cache rather than loading it all up front.
         bytes = open(Mmap.mmap, src)
-        return IOBuffer(bytes; read=true, write=false), String(src)
+        return IOBuffer(bytes; read=true, write=false), String(src), bytes
     elseif src isa IO
-        return src, "<IO>"
+        return src, "<IO>", nothing
     else
         error("parse_messages: expected an IO, byte vector, or filename, got $(typeof(src))")
     end
@@ -1182,11 +1303,23 @@ Construct a `MessageIterator` via [`parse_messages`](@ref); do not call the
 constructor directly. Each iteration reads and decodes exactly one message,
 honoring the `skip` setting (see [`parse_messages`](@ref)). Trailing bad
 messages are handled per `throw_on_error` (see [`parse_messages`](@ref)).
+
+When the source is a byte vector or memory-mapped file and the stream is
+unpacked, the iterator reads each message into an [`MmapMessageReader`](@ref)
+whose segment bodies are zero-copy views of the backing bytes, so
+byte-strideable primitive lists decode as `reinterpret`-views directly over
+the backing storage with no per-element copy. For packed input or a raw IO,
+the iterator falls back to the materialized `MessageReader` path.
 """
 struct MessageIterator
     sf::SchemaFile
     node_name::String
     io::IO
+    # The backing byte vector when `io` is an IOBuffer over a byte vector or
+    # an mmap'd file (`nothing` for a raw IO). When non-`nothing` and the
+    # stream is unpacked, iteration uses `read_message_mmap` to produce
+    # `MmapMessageReader`s with zero-copy segment views.
+    bytes::Union{Nothing, Vector{UInt8}}
     packed::Bool
     skip   # nothing, a collection of path strings, or a path -> Bool predicate
     src_name::String         # filename / "<byte vector>" / "<IO>" for warnings
@@ -1214,7 +1347,7 @@ function Base.iterate(it::MessageIterator, _state::Nothing=nothing)
     eof(it.io) && return nothing
     start_off = position(it.io)
     try
-        mr, _ = _read_message_io_with_skip(it.io, it.packed, it.sf, it.node_name, it.skip)
+        mr = _read_next_message(it)
         mr === nothing && return nothing
         node = it.sf.flat[it.node_name]
         val = read_struct(get_root(mr), it.sf, node; skip=it.skip)
@@ -1228,6 +1361,35 @@ function Base.iterate(it::MessageIterator, _state::Nothing=nothing)
         end
         rethrow(e)
     end
+end
+
+"Read the next message from `it`'s source. For unpacked input with a backing
+byte vector (byte vector or mmap'd file), use `read_message_mmap_checked` to
+produce an `MmapMessageReader` with zero-copy segment views (and validate
+bounds, raising `MessageStreamError`s on truncation/corruption consistent
+with the IO reader). Otherwise (packed, or a raw IO without a backing byte
+vector) fall back to the existing skip-aware IO reader (which materializes
+the segment bodies as `Vector{UInt64}`)."
+function _read_next_message(it::MessageIterator)
+    if !it.packed && it.bytes !== nothing
+        # Unpacked with a backing byte vector: build an MmapMessageReader
+        # whose segment bodies are zero-copy views of `it.bytes`. The skip
+        # optimization is handled naturally -- segments containing only
+        # skipped fields are simply never paged in by the OS, since the
+        # typed layer never reads them. The IO position is advanced past
+        # the whole message so the next iteration starts at the next one.
+        pos = position(it.io)  # 0-based byte offset
+        res = read_message_mmap_checked(it.bytes; start=pos + 1)
+        res === nothing && return nothing
+        mr, next_pos = res
+        # Advance the IO to just past the message (next_pos is 1-based).
+        seek(it.io, next_pos - 1)
+        return mr
+    end
+    # Packed, or a raw IO without a backing byte vector: use the existing
+    # skip-aware IO reader (materializes segments as Vector{UInt64}).
+    mr, _ = _read_message_io_with_skip(it.io, it.packed, it.sf, it.node_name, it.skip)
+    return mr
 end
 
 # ----- Offset-tracking iterator ------------------------------------------------

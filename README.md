@@ -13,6 +13,10 @@ This package supports:
 - Schema-driven typed reading and writing
 - Streaming iteration over concatenated messages, with optional field skipping
   (avoid decoding -- and for unpacked streams, avoid reading -- large fields)
+- Zero-copy primitive-list reading from memory-mapped files: byte-strideable
+  primitive lists (`List(Int8)`/`UInt8`/`Int16`/`UInt16`/`Int32`/`UInt32`/
+  `Int64`/`UInt64`/`Float32`/`Float64`) are returned as `reinterpret`-views
+  directly over the mmap'd bytes, with no per-element copy
 
 ## Status
 

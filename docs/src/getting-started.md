@@ -189,6 +189,43 @@ The encoding is auto-detected from the first message; pass `packed=true` or
 `packed=false` to force it. The decision is then applied to every message in
 the stream.
 
+### Zero-copy primitive lists from mmap'd files
+
+When a stream is unpacked and the source is a byte vector or memory-mapped
+file, [`parse_message`](@ref) and [`parse_messages`](@ref) read each message
+into an [`MmapMessageReader`](@ref) whose segment bodies are zero-copy views
+of the backing bytes. As a result, byte-strideable primitive lists
+(`List(Int8)`/`UInt8`/`Int16`/`UInt16`/`Int32`/`UInt32`/`Int64`/`UInt64`/
+`Float32`/`Float64`) are returned as `reinterpret`-views directly over the
+mmap'd region -- no per-element copy is made and the OS pages the data in on
+demand. The decoded value is an `AbstractVector{T}` (specifically a
+`Base.ReinterpretArray`), not a `Vector{T}`:
+
+```julia
+schema = parse_schema(\"\"\"
+@0x77;
+struct Spectrum { data @0 :List(Float32); }
+\"\"\")
+bytes = build_message((data=Float32[1f0, 2f0, 3f0, 4f0],), schema, "Spectrum"; packed=false)
+
+out = parse_message(bytes, schema, "Spectrum"; packed=false)
+out.data isa AbstractVector{Float32}   # true
+out.data isa Vector{Float32}           # false -- it is a zero-copy view
+out.data == Float32[1, 2, 3, 4]        # true
+```
+
+This is the fastest way to read large primitive arrays from a Cap'n Proto
+file: the array is not copied, and bytes the reader does not touch (e.g.
+segments containing only skipped fields) are never paged in by the OS.
+
+`Void` and `Bool` lists (not byte-strideable: `Void` carries no data, `Bool`
+is bit-packed at 1 bit/elem) and `Text`/`Data`/struct lists (pointer lists)
+are still materialized element-by-element. For packed input the message must
+be unpacked (materialized) and so cannot share the mmap-backed
+representation; the decoded primitive lists are still `AbstractVector{T}`
+views over the materialized segment words, but the segment words themselves
+are copied from the packed stream.
+
 ### Recording byte offsets while iterating
 
 The default iterator yields only the decoded value. To also get the 0-based

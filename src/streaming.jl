@@ -140,6 +140,60 @@ function _read_words_io(io::IO, n::Int)::Vector{UInt64}
     return seg
 end
 
+# ----- Mmap-backed unpacked reader --------------------------------------------
+#
+# A checked wrapper around `read_message_mmap` (defined in message.jl) that
+# validates the message's declared bounds against the available bytes and
+# raises `MessageStreamError`s (TruncatedMessageError / CorruptedMessageError)
+# consistent with the IO-based readers, so the streaming iterator's error
+# handling can treat mmap and IO sources uniformly.
+
+"Read one unpacked message from `bytes` (typically an `Mmap.mmap` result)
+starting at 1-based byte index `start`, returning an `MmapMessageReader` and
+the 1-based byte index just past the message. Returns `nothing` at a clean
+end of stream. Throws a `TruncatedMessageError` on a partial message at EOF;
+throws a `CorruptedMessageError` on a corrupt segment count or a declared
+length that runs past the end of `bytes`."
+function read_message_mmap_checked(bytes::Vector{UInt8}; start::Int=1)
+    n = length(bytes)
+    # Clean EOF: no bytes available from `start`.
+    start > n && return nothing
+    # Need at least 4 bytes for the segment count.
+    n - start + 1 < 4 && throw(TruncatedMessageError("read_message_mmap: EOF reading segment count"))
+    seg_count = Int(load_u32_le(bytes, start)) + 1
+    (seg_count == 0 || seg_count > 1 << 20) &&
+        throw(CorruptedMessageError("read_message_mmap: bad segment count $seg_count"))
+    ii = start + 4
+    table_u32s = 1 + seg_count
+    # Validate the segment-length words are available.
+    n - ii + 1 < 4 * seg_count &&
+        throw(TruncatedMessageError("read_message_mmap: EOF reading segment lengths"))
+    lengths = Vector{Int}(undef, seg_count)
+    for k in 1:seg_count
+        lengths[k] = Int(load_u32_le(bytes, ii))
+        ii += 4
+    end
+    # Pad so the body starts on an 8-byte boundary relative to `start`.
+    table_bytes = ii - start
+    if table_bytes % 8 != 0
+        ii += 8 - (table_bytes % 8)
+    end
+    # Validate the segment bodies are available; sum their lengths for the
+    # total body byte count.
+    total_body = 0
+    for k in 1:seg_count
+        total_body += lengths[k] * 8
+    end
+    n - ii + 1 < total_body &&
+        throw(TruncatedMessageError("read_message_mmap: EOF in segment bodies"))
+    seg_offsets = Vector{Int}(undef, seg_count)
+    for k in 1:seg_count
+        seg_offsets[k] = ii
+        ii += lengths[k] * 8
+    end
+    return MmapMessageReader(bytes, seg_offsets, lengths), ii
+end
+
 # ----- Packed -----------------------------------------------------------------
 #
 # A packed stream has no per-message length prefix, so to read one message we
