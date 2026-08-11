@@ -1,7 +1,7 @@
 name = "CapnProto"
 uuid = "8ce9df8c-dba9-49be-9fd3-d4a0ef72fecc"
 license = "BSD-2-Clause"
-version = "0.4.0"
+version = "0.4.1"
 authors = ["David MacMahon <davidm@astro.berkeley.edu>"]
 
 [deps]
