@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Getting Started · CapnProto.jl</title><meta name="title" content="Getting Started · CapnProto.jl"/><meta property="og:title" content="Getting Started · CapnProto.jl"/><meta property="twitter:title" content="Getting Started · CapnProto.jl"/><meta name="description" content="Documentation for CapnProto.jl."/><meta property="og:description" content="Documentation for CapnProto.jl."/><meta property="twitter:description" content="Documentation for CapnProto.jl."/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../">CapnProto.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li class="is-active"><a class="tocitem" href>Getting Started</a><ul class="internal"><li><a class="tocitem" href="#Installation"><span>Installation</span></a></li><li><a class="tocitem" href="#A-first-message:-low-level-building"><span>A first message: low-level building</span></a></li><li><a class="tocitem" href="#Nested-structs-and-lists"><span>Nested structs and lists</span></a></li><li><a class="tocitem" href="#Schema-driven-reading-and-writing"><span>Schema-driven reading and writing</span></a></li><li><a class="tocitem" href="#Schema-evolution-and-compatibility"><span>Schema evolution and compatibility</span></a></li><li><a class="tocitem" href="#Files-and-streams"><span>Files and streams</span></a></li></ul></li><li><a class="tocitem" href="../wire-format/">Wire Format</a></li><li><a class="tocitem" href="../schema/">Schema Language</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li class="is-active"><a href>Getting Started</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Getting Started</a></li></ul></nav><div class="docs-right"><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Getting-Started"><a class="docs-heading-anchor" href="#Getting-Started">Getting Started</a><a id="Getting-Started-1"></a><a class="docs-heading-anchor-permalink" href="#Getting-Started" title="Permalink"></a></h1><h2 id="Installation"><a class="docs-heading-anchor" href="#Installation">Installation</a><a id="Installation-1"></a><a class="docs-heading-anchor-permalink" href="#Installation" title="Permalink"></a></h2><pre><code class="language-julia hljs">] add https://github.com/david-macmahon/CapnProto.jl</code></pre><h2 id="A-first-message:-low-level-building"><a class="docs-heading-anchor" href="#A-first-message:-low-level-building">A first message: low-level building</a><a id="A-first-message:-low-level-building-1"></a><a class="docs-heading-anchor-permalink" href="#A-first-message:-low-level-building" title="Permalink"></a></h2><p>The low-level API exposes a <a href="../wire-format/#CapnProto.MessageBuilder"><code>MessageBuilder</code></a> onto which you allocate a root struct with <a href="../wire-format/#CapnProto.init_root_struct!"><code>init_root_struct!</code></a>. Fields are written with typed setters such as <a href="../wire-format/#CapnProto.set_int64!"><code>set_int64!</code></a> and <a href="../wire-format/#CapnProto.set_text!"><code>set_text!</code></a>.</p><pre><code class="language-julia hljs">using CapnProto
+
+b = MessageBuilder()
+root = init_root_struct!(b, 2, 2)        # 2 data words, 2 pointer slots
+set_int64!(root, 0, 0x0102030405060708)
+set_int32!(root, 1, 0x0a0b0c0d)
+set_text!(root, 0, &quot;hello&quot;)
+
+bytes = write_packed(b)                  # serialize with the packed encoding</code></pre><p>Reading flips the direction: parse the bytes into a <a href="../wire-format/#CapnProto.MessageReader"><code>MessageReader</code></a> with <a href="../wire-format/#CapnProto.read_packed"><code>read_packed</code></a>, fetch the root with <a href="../wire-format/#CapnProto.get_root"><code>get_root</code></a>, and use the typed getters.</p><pre><code class="language-julia hljs">r = read_packed(bytes)
+root = get_root(r)
+get_int64(root, 0)        # -&gt; 0x0102030405060708
+get_uint32(root, 1)       # -&gt; 0x0a0b0c0d
+get_text(root, 0)         # -&gt; &quot;hello&quot;</code></pre><h2 id="Nested-structs-and-lists"><a class="docs-heading-anchor" href="#Nested-structs-and-lists">Nested structs and lists</a><a id="Nested-structs-and-lists-1"></a><a class="docs-heading-anchor-permalink" href="#Nested-structs-and-lists" title="Permalink"></a></h2><p>Pointer-typed fields are allocated with <a href="../wire-format/#CapnProto.alloc_struct!"><code>alloc_struct!</code></a>, <a href="../wire-format/#CapnProto.alloc_list!"><code>alloc_list!</code></a>, and <a href="../wire-format/#CapnProto.alloc_composite_list!"><code>alloc_composite_list!</code></a>, which return a builder for the new object and write the pointer into the parent&#39;s pointer section.</p><pre><code class="language-julia hljs">b = MessageBuilder()
+root = init_root_struct!(b, 1, 2)
+set_int32!(root, 0, 42)
+
+sub = alloc_struct!(root, 0, 1, 1)
+set_int64!(sub, 0, 999)
+set_text!(sub, 0, &quot;nested&quot;)
+
+lst = alloc_list!(root, 1, INT32_LIST, 4)
+for i in 0:3
+    set_element!(lst, i, UInt64(UInt32(i * 10)))
+end
+
+bytes = write_message(b)                 # unpacked this time
+r, _ = read_message(bytes)
+root = get_root(r)
+get_int32(root, 0)                       # -&gt; 42
+sub_r = get_struct_field(root, 0)
+get_int64(sub_r, 0)                      # -&gt; 999
+lst_r = get_list_field(root, 1)
+[UInt32(get_element(lst_r, i)) for i in 0:3]   # -&gt; UInt32[0, 10, 20, 30]</code></pre><h2 id="Schema-driven-reading-and-writing"><a class="docs-heading-anchor" href="#Schema-driven-reading-and-writing">Schema-driven reading and writing</a><a id="Schema-driven-reading-and-writing-1"></a><a class="docs-heading-anchor-permalink" href="#Schema-driven-reading-and-writing" title="Permalink"></a></h2><p>When you have a schema, you can skip the manual layout and let the package compute it. Parse a schema string with <a href="../schema/#CapnProto.parse_schema"><code>parse_schema</code></a> and use <a href="../schema/#CapnProto.build_message"><code>build_message</code></a> / <a href="../schema/#CapnProto.parse_message"><code>parse_message</code></a> (or the lower-level <a href="../schema/#CapnProto.write_struct!"><code>write_struct!</code></a> / <a href="../schema/#CapnProto.read_struct"><code>read_struct</code></a>).</p><pre><code class="language-julia hljs">using CapnProto
+
+schema = parse_schema(\&quot;\&quot;\&quot;
+@0xab12cd34ef56ef78;
+struct Person {
+    name   @0 :Text;
+    age    @1 :Int32;
+    emails @2 :List(Text);
+}
+\&quot;\&quot;\&quot;)
+
+val = (name=&quot;Alice&quot;, age=30, emails=[&quot;a@x.com&quot;, &quot;b@y.com&quot;])
+bytes = build_message(val, schema, &quot;Person&quot;)
+
+out = parse_message(bytes, schema, &quot;Person&quot;)
+# -&gt; (name = &quot;Alice&quot;, age = 30, emails = [&quot;a@x.com&quot;, &quot;b@y.com&quot;])</code></pre><h2 id="Schema-evolution-and-compatibility"><a class="docs-heading-anchor" href="#Schema-evolution-and-compatibility">Schema evolution and compatibility</a><a id="Schema-evolution-and-compatibility-1"></a><a class="docs-heading-anchor-permalink" href="#Schema-evolution-and-compatibility" title="Permalink"></a></h2><p>CapnProto.jl follows the Cap&#39;n Proto wire-format rules for forward and backward compatibility, so a message written with one schema version reads correctly with another (older or newer) version of the same schema.</p><p><strong>Backward</strong> (old message, new reader): fields the writer did not know about decode as their declared default (zero if no default was declared). <code>Text</code> yields <code>&quot;&quot;</code>, <code>Data</code> yields <code>UInt8[]</code>, list fields yield empty typed vectors, and struct fields yield an empty struct (each nested field at its own default/empty).</p><pre><code class="language-julia hljs">old = parse_schema(&quot;&quot;&quot;
+@0x99;
+struct S { a @0 :Int64; }
+&quot;&quot;&quot;)
+new = parse_schema(&quot;&quot;&quot;
+@0x99;
+struct S { a @0 :Int64; b @1 :Int64 = 42; name @2 :Text; }
+&quot;&quot;&quot;)
+bytes = build_message((a=Int64(7),), old, &quot;S&quot;)
+out = parse_message(bytes, new, &quot;S&quot;)
+# -&gt; (a = 7, b = 42, name = &quot;&quot;)</code></pre><p><strong>Forward</strong> (new message, old reader): fields the reader&#39;s schema does not know about are silently ignored – the old reader sees only its own fields.</p><pre><code class="language-julia hljs">bytes = build_message((a=Int64(7), b=Int64(8), name=&quot;hi&quot;), new, &quot;S&quot;)
+out = parse_message(bytes, old, &quot;S&quot;)
+# -&gt; (a = 7,)   # b and name are not surfaced</code></pre><p>The same rules apply to nested structs and to the elements of composite lists: the per-element data/pointer word counts come from the message&#39;s tag word, so extra element words are ignored and missing element words yield defaults.</p><h2 id="Files-and-streams"><a class="docs-heading-anchor" href="#Files-and-streams">Files and streams</a><a id="Files-and-streams-1"></a><a class="docs-heading-anchor-permalink" href="#Files-and-streams" title="Permalink"></a></h2><p>The schema-driven API also handles files containing many concatenated messages of the same type. <a href="../schema/#CapnProto.build_message"><code>build_message</code></a> produces one message&#39;s bytes; concatenate them and write the result. <a href="../schema/#CapnProto.parse_messages"><code>parse_messages</code></a> iterates a file or stream lazily, one message at a time, and <a href="../schema/#CapnProto.parse_message"><code>parse_message</code></a> with <code>pos</code> reads a single message at a known byte offset.</p><h3 id="Writing-a-vector-of-structs-to-a-file"><a class="docs-heading-anchor" href="#Writing-a-vector-of-structs-to-a-file">Writing a vector of structs to a file</a><a id="Writing-a-vector-of-structs-to-a-file-1"></a><a class="docs-heading-anchor-permalink" href="#Writing-a-vector-of-structs-to-a-file" title="Permalink"></a></h3><pre><code class="language-julia hljs">people = [
+    (name=&quot;Alice&quot;, age=30, emails=[&quot;a@x.com&quot;, &quot;b@y.com&quot;]),
+    (name=&quot;Bob&quot;,   age=25, emails=[&quot;bob@x.com&quot;]),
+    (name=&quot;Carol&quot;, age=41, emails=[&quot;carol@x.com&quot;, &quot;c2@x.com&quot;, &quot;c3@x.com&quot;]),
+]
+# Serialize each as an unpacked message and concatenate them.
+stream = reduce(vcat, [build_message(p, schema, &quot;Person&quot;; packed=false) for p in people])
+write(&quot;people.bin&quot;, stream)</code></pre><p>For large vectors, avoid building the whole concatenated byte vector in memory by writing each message directly to the file:</p><pre><code class="language-julia hljs">open(&quot;people.bin&quot;, &quot;w&quot;) do io
+    for p in people
+        write(io, build_message(p, schema, &quot;Person&quot;; packed=false))
+    end
+end</code></pre><h3 id="Iterating-through-the-structs-in-a-file"><a class="docs-heading-anchor" href="#Iterating-through-the-structs-in-a-file">Iterating through the structs in a file</a><a id="Iterating-through-the-structs-in-a-file-1"></a><a class="docs-heading-anchor-permalink" href="#Iterating-through-the-structs-in-a-file" title="Permalink"></a></h3><p><a href="../schema/#CapnProto.parse_messages"><code>parse_messages</code></a> reads lazily from an <code>IO</code>, a byte vector, or a filename. A filename is memory-mapped (via <code>Mmap.mmap</code>), so the file is paged in on demand as the iterator reads rather than loaded up front; the whole file is never held in memory:</p><pre><code class="language-julia hljs">for person in parse_messages(&quot;people.bin&quot;, schema, &quot;Person&quot;; packed=false)
+    println(person.name, &quot; is &quot;, person.age, &quot; (&quot;, length(person.emails), &quot; emails)&quot;)
+end
+# Alice is 30 (2 emails)
+# Bob is 25 (1 emails)
+# Carol is 41 (3 emails)</code></pre><p>The encoding is auto-detected from the first message; pass <code>packed=true</code> or <code>packed=false</code> to force it. The decision is then applied to every message in the stream.</p><h3 id="Recording-byte-offsets-while-iterating"><a class="docs-heading-anchor" href="#Recording-byte-offsets-while-iterating">Recording byte offsets while iterating</a><a id="Recording-byte-offsets-while-iterating-1"></a><a class="docs-heading-anchor-permalink" href="#Recording-byte-offsets-while-iterating" title="Permalink"></a></h3><p>The default iterator yields only the decoded value. To also get the 0-based byte offset at which each message began (e.g. to record seek positions for later replay via <a href="../schema/#CapnProto.parse_message"><code>parse_message</code></a> with <code>pos=</code>), wrap the iterator with <a href="../schema/#CapnProto.with_offsets"><code>with_offsets</code></a>:</p><pre><code class="language-julia hljs">offsets = Int[]
+for (off, person) in with_offsets(parse_messages(&quot;people.bin&quot;, schema, &quot;Person&quot;))
+    push!(offsets, off)
+    println(&quot;message at byte &quot;, off, &quot;: &quot;, person.name)
+end
+# message at byte 0: Alice
+# message at byte 56: Bob
+# message at byte 96: Carol
+
+# Re-read just the second record by its recorded offset.
+bob = parse_message(&quot;people.bin&quot;, schema, &quot;Person&quot;; pos=offsets[2])</code></pre><p>The offset matches the <code>pos</code> keyword of <a href="../schema/#CapnProto.parse_message"><code>parse_message</code></a>. The underlying IO must support <code>position</code> (an <code>IOBuffer</code>, file stream, or the memory-mapped wrapper used by <code>parse_messages</code> over a filename all do).</p><h3 id="Skipping-fields"><a class="docs-heading-anchor" href="#Skipping-fields">Skipping fields</a><a id="Skipping-fields-1"></a><a class="docs-heading-anchor-permalink" href="#Skipping-fields" title="Permalink"></a></h3><p>When iterating a stream, you can skip decoding one or more fields with the <code>skip</code> keyword. Skipped fields yield typed empty values (<code>Float32[]</code>, <code>&quot;&quot;</code>, <code>UInt8[]</code>, etc.) instead of their full contents. For unpacked streams the segments holding only skipped data are seeked past entirely – their bytes are never read from the file. For packed streams those segments are decoded-and- discarded (the packed encoding is variable-length, so the bytes are read but not retained).</p><p><code>skip</code> accepts a collection of dotted, root-relative field paths or a <code>path -&gt; Bool</code> predicate:</p><pre><code class="language-julia hljs"># Skip the emails field of every person.
+for person in parse_messages(&quot;people.bin&quot;, schema, &quot;Person&quot;; skip=[&quot;emails&quot;])
+    println(person.name, &quot; has &quot;, length(person.emails), &quot; emails&quot;)
+end
+# Alice has 0 emails
+# Bob has 0 emails
+# Carol has 0 emails
+
+# Equivalent predicate form.
+for person in parse_messages(&quot;people.bin&quot;, schema, &quot;Person&quot;;
+                             skip = p -&gt; p == &quot;emails&quot;)
+    println(person.name)
+end</code></pre><h3 id="Parsing-a-struct-from-the-file-at-a-given-offset"><a class="docs-heading-anchor" href="#Parsing-a-struct-from-the-file-at-a-given-offset">Parsing a struct from the file at a given offset</a><a id="Parsing-a-struct-from-the-file-at-a-given-offset-1"></a><a class="docs-heading-anchor-permalink" href="#Parsing-a-struct-from-the-file-at-a-given-offset" title="Permalink"></a></h3><p>Each <code>build_message</code> call produces one self-delimited message, so you can record byte offsets as you write and later read individual records without scanning the whole file. <code>pos</code> is a 0-based byte offset, matching the convention of <code>position</code> and <code>seek</code>.</p><pre><code class="language-julia hljs"># Record the byte offset of each record as we write.
+offsets = Int[]
+buf = IOBuffer()
+for p in people
+    push!(offsets, position(buf))            # 0-based offset of this message
+    write(buf, build_message(p, schema, &quot;Person&quot;; packed=false))
+end
+stream = take!(buf)
+write(&quot;people.bin&quot;, stream)
+
+# Read just the second record from the file, by its offset.
+bob = parse_message(&quot;people.bin&quot;, schema, &quot;Person&quot;; pos=offsets[2], packed=false)
+# -&gt; (name = &quot;Bob&quot;, age = 25, emails = [&quot;bob@x.com&quot;])</code></pre><p>See the <a href="../wire-format/#Wire-Format">Wire Format</a> and <a href="../schema/#Schema-Language">Schema Language</a> pages for the full low-level and schema-driven APIs.</p></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../">« Home</a><a class="docs-footer-nextpage" href="../wire-format/">Wire Format »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Tuesday 11 August 2026 00:22">Tuesday 11 August 2026</span>. Using Julia version 1.10.11.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
